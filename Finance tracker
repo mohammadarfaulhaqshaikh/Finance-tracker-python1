@@ -1,0 +1,406 @@
+import csv
+from datetime import datetime
+import json
+import os
+
+DATA_FILE = "finance_data.json"
+CSV_FILE = "finance_report.csv"
+DEFAULT_CATEGORIES = ["General", "Food", "Travel", "Bills", "Shopping", "Salary"]
+
+
+class FinanceTracker:
+    def __init__(self, balance=0.0, transactions=None, monthly_budget=None, goal_name=None, goal_target=None, goal_saved=0.0):
+        self.balance = float(balance)
+        self.monthly_budget = float(monthly_budget) if monthly_budget is not None else None
+        self.goal_name = goal_name
+        self.goal_target = float(goal_target) if goal_target is not None else None
+        self.goal_saved = float(goal_saved or 0.0)
+        self.transactions = [self._normalize_item(item) for item in (transactions or [])]
+
+    @staticmethod
+    def _normalize_item(item):
+        if len(item) == 5:
+            date_str, kind, amount, category, note = item
+        elif len(item) == 4:
+            kind, amount, category, note = item
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            kind, amount, note = item
+            category = "General"
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        return [date_str, kind, float(amount), category, note]
+
+    def current_month_expenses(self):
+        prefix = datetime.now().strftime("%Y-%m")
+        return sum(
+            abs(amount)
+            for date_str, kind, amount, _, _ in self.transactions
+            if kind == "Expense" and date_str.startswith(prefix)
+        )
+
+    def _check_budget_status(self):
+        if self.monthly_budget is None:
+            return
+        spent = self.current_month_expenses()
+        remaining = self.monthly_budget - spent
+        if remaining < 0:
+            print(f"Budget Alert: You are over this month's budget by {abs(remaining):.2f}!")
+        elif remaining <= self.monthly_budget * 0.15:
+            print(f"Budget Notice: Only {remaining:.2f} left of your {self.monthly_budget:.2f} monthly budget.")
+
+    def set_monthly_budget(self, budget):
+        self.monthly_budget = float(budget) if budget is not None else None
+        self.save()
+        if self.monthly_budget is not None:
+            print(f"Monthly budget set to {self.monthly_budget:.2f}.")
+            self._check_budget_status()
+        else:
+            print("Monthly budget cleared.")
+
+    def set_goal(self, name, target):
+        self.goal_name = name.strip() or "Savings Goal"
+        self.goal_target = float(target)
+        self.goal_saved = min(self.goal_saved, self.goal_target)
+        self.save()
+        print(f"Goal '{self.goal_name}' set to {self.goal_target:.2f}.")
+
+    def contribute_to_goal(self, amount):
+        if not self.goal_name or not self.goal_target:
+            print("Set a savings goal first.")
+            return
+        if amount > self.balance:
+            print("Warning: Contribution is higher than your current balance.")
+        self.goal_saved += float(amount)
+        self.balance -= float(amount)
+        self.transactions.append([
+            datetime.now().strftime("%Y-%m-%d"),
+            "Expense",
+            -float(amount),
+            "Savings",
+            f"Goal: {self.goal_name}",
+        ])
+        self.save()
+        self.show_goal()
+
+    def show_goal(self):
+        if not self.goal_name or not self.goal_target:
+            print("No savings goal set yet.")
+            return
+        pct = min(100.0, (self.goal_saved / self.goal_target) * 100)
+        filled = int(pct // 10)
+        bar = "#" * filled + "." * (10 - filled)
+        print(f"\nGoal - {self.goal_name}: {self.goal_saved:.2f} / {self.goal_target:.2f} [{bar}] {pct:.0f}%")
+
+    def reset_all(self):
+        self.balance = 0.0
+        self.monthly_budget = None
+        self.goal_name = None
+        self.goal_target = None
+        self.goal_saved = 0.0
+        self.transactions = []
+        self.save()
+        print("All tracker data reset to zero.")
+
+    def add_income(self, amount, category="Salary", note="", date_str=None):
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        self.balance += amount
+        self.transactions.append([date_str, "Income", float(amount), category, note])
+        self.save()
+
+    def add_expense(self, amount, category="General", note="", date_str=None):
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        if amount > self.balance:
+            print("Warning: Expense exceeds current balance.")
+        self.balance -= amount
+        self.transactions.append([date_str, "Expense", -float(amount), category, note])
+        self.save()
+        self._check_budget_status()
+
+    def edit_transaction(self, index_one_based, new_abs_amount=None, new_category=None, new_note=None):
+        if not (1 <= index_one_based <= len(self.transactions)):
+            print("Invalid transaction number.")
+            return False
+
+        date_str, kind, old_signed_amount, old_category, old_note = self.transactions[index_one_based - 1]
+        # Revert old amount from balance before applying updated amount
+        self.balance -= old_signed_amount
+
+        if new_abs_amount is not None:
+            new_signed_amount = float(new_abs_amount) if kind == "Income" else -float(new_abs_amount)
+        else:
+            new_signed_amount = old_signed_amount
+
+        self.balance += new_signed_amount
+        updated_category = new_category if new_category is not None else old_category
+        updated_note = new_note if new_note is not None else old_note
+
+        self.transactions[index_one_based - 1] = [
+            date_str,
+            kind,
+            new_signed_amount,
+            updated_category,
+            updated_note,
+        ]
+        self.save()
+        print(f"Updated #{index_one_based}: [{date_str}] {kind} [{updated_category}] {new_signed_amount:+.2f}")
+        print(f"Updated Balance: {self.balance:.2f}")
+        if kind == "Expense":
+            self._check_budget_status()
+        return True
+
+    def delete_transaction(self, index_one_based):
+        if not (1 <= index_one_based <= len(self.transactions)):
+            print("Invalid transaction number.")
+            return False
+
+        date_str, kind, signed_amount, category, note = self.transactions.pop(index_one_based - 1)
+        self.balance -= signed_amount
+        self.save()
+        label = f" ({note})" if note else ""
+        print(f"Removed #{index_one_based} [{date_str}]: {kind} [{category}] {signed_amount:+.2f}{label}")
+        print(f"Updated Balance: {self.balance:.2f}")
+        return True
+
+    def _print_rows(self, rows):
+        if not rows:
+            print("  No matching transactions.")
+            return
+        for idx, (date_str, kind, amount, category, note) in rows:
+            sign = "+" if amount >= 0 else "-"
+            label = f" ({note})" if note else ""
+            print(f"  {idx}. [{date_str}] {kind} [{category}]: {sign}{abs(amount):.2f}{label}")
+
+    def list_transactions(self):
+        indexed = list(enumerate(self.transactions, start=1))
+        self._print_rows(indexed)
+
+    def search_transactions(self, query="", category="", kind=""):
+        q = query.strip().lower()
+        cat = category.strip().lower()
+        k = kind.strip().lower()
+
+        matches = []
+        for idx, item in enumerate(self.transactions, start=1):
+            date_str, item_kind, amount, item_cat, note = item
+            if k and item_kind.lower() != k:
+                continue
+            if cat and item_cat.lower() != cat:
+                continue
+            if q:
+                haystack = f"{date_str} {item_kind} {item_cat} {note}".lower()
+                if q not in haystack:
+                    continue
+            matches.append((idx, item))
+
+        print(f"\nSearch Results ({len(matches)} found):")
+        self._print_rows(matches)
+        if matches:
+            total = sum(item[2] for _, item in matches)
+            print(f"Net Total for Matches: {total:+.2f}")
+
+    def summary(self):
+        total_income = sum(amt for _, kind, amt, _, _ in self.transactions if kind == "Income")
+        total_expense = sum(abs(amt) for _, kind, amt, _, _ in self.transactions if kind == "Expense")
+
+        print(f"\nCurrent Balance: {self.balance:.2f}")
+        print(f"Total Income: {total_income:.2f} | Total Expenses: {total_expense:.2f}")
+        if self.monthly_budget is not None:
+            spent = self.current_month_expenses()
+            print(f"This Month's Spending: {spent:.2f} / {self.monthly_budget:.2f}")
+        if self.goal_name and self.goal_target:
+            self.show_goal()
+
+        print("\nRecent Transactions:")
+        self.list_transactions()
+
+        category_totals = {}
+        for _, kind, amount, category, _ in self.transactions:
+            if kind == "Expense":
+                category_totals[category] = category_totals.get(category, 0.0) + abs(amount)
+
+        if category_totals:
+            print("\nSpending by Category:")
+            for cat, total in sorted(category_totals.items(), key=lambda x: x[1], reverse=True):
+                print(f"  {cat}: {total:.2f}")
+
+    def export_csv(self, filepath=CSV_FILE):
+        with open(filepath, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Date", "Type", "Category", "Amount", "Note"])
+            for date_str, kind, amount, category, note in self.transactions:
+                writer.writerow([date_str, kind, category, f"{amount:.2f}", note])
+            writer.writerow([])
+            writer.writerow(["Current Balance", "", "", f"{self.balance:.2f}", ""])
+            if self.monthly_budget is not None:
+                writer.writerow(["Monthly Budget", "", "", f"{self.monthly_budget:.2f}", ""])
+        print(f"Exported to '{filepath}' in your current folder.")
+
+    def save(self, filepath=DATA_FILE):
+        data = {
+            "balance": self.balance,
+            "monthly_budget": self.monthly_budget,
+            "goal_name": self.goal_name,
+            "goal_target": self.goal_target,
+            "goal_saved": self.goal_saved,
+            "transactions": self.transactions,
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    @classmethod
+    def load(cls, filepath=DATA_FILE):
+        if not os.path.exists(filepath):
+            return cls()
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(
+            balance=data.get("balance", 0.0),
+            transactions=data.get("transactions", []),
+            monthly_budget=data.get("monthly_budget"),
+            goal_name=data.get("goal_name"),
+            goal_target=data.get("goal_target"),
+            goal_saved=data.get("goal_saved", 0.0),
+        )
+
+
+def read_amount(prompt):
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = float(raw)
+            if value <= 0:
+                print("Please enter a positive number.")
+                continue
+            return value
+        except ValueError:
+            print("Invalid number. Try again (e.g., 250 or 1200.50).")
+
+
+def read_int(prompt):
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return int(raw)
+        except ValueError:
+            print("Please enter a valid whole number.")
+
+
+def choose_category(default="General"):
+    print("Categories:", ", ".join(DEFAULT_CATEGORIES))
+    cat = input(f"Enter category (or press Enter for '{default}'): ").strip()
+    return cat if cat else default
+
+
+def main():
+    tracker = FinanceTracker.load()
+
+    while True:
+        print("\n1. Add Income")
+        print("2. Add Expense")
+        print("3. View Summary")
+        print("4. Search / Filter Transactions")
+        print("5. Edit Transaction")
+        print("6. Delete Transaction")
+        print("7. Set Monthly Budget")
+        print("8. Savings Goal (Set / Add)")
+        print("9. Export to CSV")
+        print("10. Reset All Data")
+        print("11. Exit")
+        choice = input("Choose an option (1-11): ").strip()
+
+        if choice == "1":
+            amount = read_amount("Enter income amount: ")
+            category = choose_category(default="Salary")
+            note = input("Note (optional): ").strip()
+            tracker.add_income(amount, category, note)
+            print("Income saved.")
+        elif choice == "2":
+            amount = read_amount("Enter expense amount: ")
+            category = choose_category(default="General")
+            note = input("Note (optional): ").strip()
+            tracker.add_expense(amount, category, note)
+            print("Expense saved.")
+        elif choice == "3":
+            tracker.summary()
+        elif choice == "4":
+            kind_raw = input("Type filter ('income', 'expense', or Enter for all): ").strip().lower()
+            kind = "Income" if kind_raw == "income" else ("Expense" if kind_raw == "expense" else "")
+            category = input("Category filter (or Enter for all): ").strip()
+            query = input("Keyword in date/category/note (or Enter for all): ").strip()
+            tracker.search_transactions(query=query, category=category, kind=kind)
+        elif choice == "5":
+            print("\nSelect a transaction to edit:")
+            tracker.list_transactions()
+            if tracker.transactions:
+                num = read_int("Enter transaction number (or 0 to cancel): ")
+                if 1 <= num <= len(tracker.transactions):
+                    _, _, old_amt, old_cat, old_note = tracker.transactions[num - 1]
+                    amt_raw = input(f"New amount [{abs(old_amt):.2f}] (or Enter to keep): ").strip()
+                    new_amt = None
+                    if amt_raw:
+                        try:
+                            val = float(amt_raw)
+                            if val <= 0:
+                                print("Amount must be positive; edit cancelled.")
+                                continue
+                            new_amt = val
+                        except ValueError:
+                            print("Invalid number; edit cancelled.")
+                            continue
+                    cat_raw = input(f"New category [{old_cat}] (or Enter to keep): ").strip()
+                    new_cat = cat_raw if cat_raw else None
+                    note_raw = input(f"New note [{old_note}] (or Enter to keep): ").strip()
+                    new_note = note_raw if note_raw else None
+                    tracker.edit_transaction(num, new_amt, new_cat, new_note)
+                elif num != 0:
+                    print("Invalid transaction number.")
+        elif choice == "6":
+            print("\nSelect a transaction to delete:")
+            tracker.list_transactions()
+            if tracker.transactions:
+                num = read_int("Enter transaction number (or 0 to cancel): ")
+                if num != 0:
+                    tracker.delete_transaction(num)
+        elif choice == "7":
+            raw = input("Enter monthly budget (or 'clear' to remove): ").strip().lower()
+            if raw == "clear":
+                tracker.set_monthly_budget(None)
+            else:
+                try:
+                    val = float(raw)
+                    if val <= 0:
+                        print("Budget must be greater than 0.")
+                    else:
+                        tracker.set_monthly_budget(val)
+                except ValueError:
+                    print("Invalid input. Enter a number or 'clear'.")
+        elif choice == "8":
+            tracker.show_goal()
+            print("a. Set/Update Goal")
+            print("b. Add Money to Goal")
+            sub = input("Choose a or b (or Enter to cancel): ").strip().lower()
+            if sub == "a":
+                name = input("Goal name (e.g., New Phone): ").strip()
+                target = read_amount("Target amount: ")
+                tracker.set_goal(name, target)
+            elif sub == "b":
+                amt = read_amount("Amount to add to goal: ")
+                tracker.contribute_to_goal(amt)
+        elif choice == "9":
+            tracker.export_csv()
+        elif choice == "10":
+            confirm = input("Type 'yes' to erase all saved data: ").strip().lower()
+            if confirm == "yes":
+                tracker.reset_all()
+            else:
+                print("Reset cancelled.")
+        elif choice == "11":
+            print("Data saved. Goodbye!")
+            break
+        else:
+            print("Invalid choice. Please enter 1-11.")
+
+
+if __name__ == "__main__":
+    main()
+    
